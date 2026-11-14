@@ -1,7 +1,6 @@
 package net.imadz.application.projection
 
 import akka.actor.typed.ActorSystem
-import akka.contrib.persistence.mongodb.MongoReadJournal
 import akka.persistence.query.Offset
 import akka.projection.ProjectionId
 import akka.projection.eventsourced.EventEnvelope
@@ -29,7 +28,7 @@ object WorkOrderCompletionProjection {
 
     val rawProvider: SourceProvider[Offset, EventEnvelope[LotEventPO.Event]] = EventSourcedProvider
       .eventsByTag(system = system,
-        readJournalPluginId = MongoReadJournal.Identifier,
+        readJournalPluginId = system.settings.config.getString("fab.persistence.read-journal-plugin-id"),
         tag = tag)
 
     JdbcProjection.exactlyOnce(

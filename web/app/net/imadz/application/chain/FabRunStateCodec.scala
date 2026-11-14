@@ -31,7 +31,7 @@ object FabRunStateCodec {
       lastOcapError = s.lastOutcome.collect { case FabRunState.OcapResolved(err) => toProtoError(err) }
     )
 
-  private def toProtoState(s: FabDemoState): FabDemoStateProto =
+  private[imadz] def toProtoState(s: FabDemoState): FabDemoStateProto =
     FabDemoStateProto(
       wafers = s.wafers.view.mapValues(toProtoWafer).toMap,
       passCount = s.passCount,
@@ -63,7 +63,7 @@ object FabRunStateCodec {
   private def toProtoEquipment(e: EquipmentState): EquipmentStateProto =
     EquipmentStateProto(e.equipmentId, e.status, e.errorCount)
 
-  private def toProtoError(e: StageError): StageErrorProto =
+  private[imadz] def toProtoError(e: StageError): StageErrorProto =
     StageErrorProto(e.stageName, e.equipId.getOrElse(""), e.errorCode, e.detail)
 
   private def toProtoPlan(p: OcapActionPlan): OcapActionPlanProto = {
@@ -90,7 +90,7 @@ object FabRunStateCodec {
       lastOutcome = p.lastOcapError.map(e => FabRunState.OcapResolved(fromProtoError(e)))
     )
 
-  private def fromProtoState(p: FabDemoStateProto): FabDemoState =
+  private[imadz] def fromProtoState(p: FabDemoStateProto): FabDemoState =
     FabDemoState(
       wafers = p.wafers.view.mapValues(fromProtoWafer).toMap,
       passCount = p.passCount,
@@ -122,7 +122,7 @@ object FabRunStateCodec {
   private def fromProtoEquipment(p: EquipmentStateProto): EquipmentState =
     EquipmentState(p.equipmentId, p.status, p.errorCount)
 
-  private def fromProtoError(p: StageErrorProto): StageError =
+  private[imadz] def fromProtoError(p: StageErrorProto): StageError =
     StageError(p.stageName, nonEmpty(p.equipId), p.errorCode, p.detail)
 
   private def fromProtoPlan(p: OcapActionPlanProto): OcapActionPlan = {

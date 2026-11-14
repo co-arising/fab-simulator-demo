@@ -27,20 +27,69 @@ trait LotProtoConverters extends PrimitiveConverter {
       classification = w.classification.getOrElse(""),
       reworkCount = w.reworkCount,
       cdValue = w.cdValue.getOrElse(0.0),
-      measured = w.measured
+      measured = w.measured,
+      // Always emit the options message, even when both fields are None. Its
+      // presence distinguishes exact new state from ambiguous legacy scalars.
+      options = Some(WaferStateOptionsPO(
+        classification = w.classification.map(value => LotStringValuePO(value = value)),
+        cdValue = w.cdValue.map(value => LotDoubleValuePO(value = value))
+      ))
     )
     override def fromProto(p: WaferStatePO): WaferState = WaferState(
       name = p.name,
       status = p.status match {
-        case "OnHold"    => WaferOnHold
-        case "Scrapped"  => WaferScrapped
-        case "Skipped"   => WaferSkipped
-        case _           => WaferActive
+        // Accept historical wire labels and the WaferStatus.toString labels
+        // already emitted by toProto; keep the existing encoded bytes unchanged.
+        case "OnHold" | "WaferOnHold"     => WaferOnHold
+        case "Scrapped" | "WaferScrapped" => WaferScrapped
+        case "Skipped" | "WaferSkipped"   => WaferSkipped
+        case _                            => WaferActive
       },
-      classification = if (p.classification.isEmpty) None else Some(p.classification),
+      classification = p.options match {
+        case Some(options) => options.classification.map(_.value)
+        case None => if (p.classification.isEmpty) None else Some(p.classification)
+      },
       reworkCount = p.reworkCount,
-      cdValue = if (p.cdValue == 0.0 && !p.measured) None else Some(p.cdValue),
+      cdValue = p.options match {
+        case Some(options) => options.cdValue.map(_.value)
+        // Legacy bytes cannot distinguish None from an unmeasured Some(0.0).
+        // Preserve the historical interpretation, not invented missing history.
+        case None => if (p.cdValue == 0.0 && !p.measured) None else Some(p.cdValue)
+      },
       measured = p.measured
+    )
+  }
+
+  object WaferNameSetConv extends ProtoConverter[Set[String], WaferNameSetPO] {
+    override def toProto(names: Set[String]): WaferNameSetPO = WaferNameSetPO(waferNames = names.toSeq)
+    override def fromProto(p: WaferNameSetPO): Set[String] = p.waferNames.toSet
+  }
+
+  object WaferStateMapConv extends ProtoConverter[Map[Id, WaferState], WaferStateMapPO] {
+    override def toProto(wafers: Map[Id, WaferState]): WaferStateMapPO = WaferStateMapPO(
+      wafers = wafers.map { case (id, state) =>
+        val wireId = IdConv.toProto(id)
+        wireId -> WaferStateConv.toProto(state).copy(waferId = wireId)
+      }
+    )
+    override def fromProto(p: WaferStateMapPO): Map[Id, WaferState] =
+      p.wafers.map { case (id, state) => IdConv.fromProto(id) -> WaferStateConv.fromProto(state) }
+  }
+
+  object RouteCardConv extends ProtoConverter[RouteCard, LotRouteCardPO] {
+    override def toProto(card: RouteCard): LotRouteCardPO = LotRouteCardPO(
+      steps = card.steps,
+      currentStepIndex = card.currentStepIndex,
+      sourcedFrom = card.sourcedFrom.map(value => LotStringValuePO(value = value)),
+      reason = card.reason,
+      assignedAt = card.assignedAt
+    )
+    override def fromProto(p: LotRouteCardPO): RouteCard = RouteCard(
+      steps = p.steps,
+      currentStepIndex = p.currentStepIndex,
+      sourcedFrom = p.sourcedFrom.map(_.value),
+      reason = p.reason,
+      assignedAt = p.assignedAt
     )
   }
 
@@ -282,6 +331,28 @@ trait LotProtoConverters extends PrimitiveConverter {
     override def fromProto(p: LotFailedPO): LotFailed = LotFailed(reason = p.reason, failedAt = p.failedAt)
   }
 
+  object RouteCardAssignedConv extends ProtoConverter[RouteCardAssigned, RouteCardAssignedPO] {
+    override def toProto(e: RouteCardAssigned): RouteCardAssignedPO = RouteCardAssignedPO(
+      steps = e.steps,
+      sourcedFrom = e.sourcedFrom.map(value => LotStringValuePO(value = value)),
+      reason = e.reason,
+      assignedAt = e.assignedAt
+    )
+    override def fromProto(p: RouteCardAssignedPO): RouteCardAssigned = RouteCardAssigned(
+      steps = p.steps,
+      sourcedFrom = p.sourcedFrom.map(_.value),
+      reason = p.reason,
+      assignedAt = p.assignedAt
+    )
+  }
+
+  object RouteCardStepAdvancedConv extends ProtoConverter[RouteCardStepAdvanced, RouteCardStepAdvancedPO] {
+    override def toProto(e: RouteCardStepAdvanced): RouteCardStepAdvancedPO =
+      RouteCardStepAdvancedPO(stepIndex = e.stepIndex)
+    override def fromProto(p: RouteCardStepAdvancedPO): RouteCardStepAdvanced =
+      RouteCardStepAdvanced(stepIndex = p.stepIndex)
+  }
+
   // --- State Snapshot ---
   object LotStateConv extends ProtoConverter[LotState, LotStatePO] {
     override def toProto(s: LotState): LotStatePO = LotStatePO(
@@ -299,38 +370,59 @@ trait LotProtoConverters extends PrimitiveConverter {
       }.toSeq,
       parentLotId = s.parentLotId.map(IdConv.toProto).getOrElse(""),
       splitReason = splitReasonToString(s.splitReason),
-      workOrderId = s.workOrderId.getOrElse("")
+      workOrderId = s.workOrderId.getOrElse(""),
+      waferStates = Some(WaferStateMapConv.toProto(s.wafers)),
+      reservedWaferNames = toProtoMap(s.reservedWaferNames, IdConv, WaferNameSetConv),
+      incomingCarriedWafers = toProtoMap(s.incomingCarriedWafers, IdConv, WaferStateMapConv),
+      routeCard = s.routeCard.map(RouteCardConv.toProto),
+      options = Some(LotStateOptionsPO(
+        loadedFoupId = s.loadedFoupId.map(value => LotStringValuePO(value = value)),
+        workOrderId = s.workOrderId.map(value => LotStringValuePO(value = value))
+      ))
     )
 
     override def fromProto(p: LotStatePO): LotState = {
-      // Reconstruct unified wafers map from old-style snapshot fields
-      val classMap = p.waferClassifications.map(r => parseWaferId(r.waferId) -> WaferClassResultConv.fromProto(r)).toMap
-      val measuredSet = p.measuredWafers.map(parseWaferId).toSet
-      val waferIds = p.waferIds.map(IdConv.fromProto)
-      val waferEntries: Map[Id, WaferState] = if (waferIds.nonEmpty) {
-        waferIds.zipWithIndex.map { case (id, idx) =>
-          val cls = classMap.get(id)
-          id -> WaferState(
-            name = s"WAFER-${idx + 1}",
-            classification = cls.map(_.classification),
-            reworkCount = cls.map(_.reworkCount).getOrElse(0),
-            cdValue = cls.map(_.cdValueNm),
-            measured = measuredSet.contains(id)
-          )
-        }.toMap
-      } else Map.empty
+      val waferEntries: Map[Id, WaferState] = p.waferStates match {
+        // The full map is authoritative, including when explicitly empty. Do
+        // not derive intrinsic state from classifications or measured flags.
+        case Some(states) => WaferStateMapConv.fromProto(states)
+        case None =>
+          // Legacy snapshots never stored names/status/full measurement history.
+          // Keep their former defaults; a route cursor alone is not a route card.
+          val classMap = p.waferClassifications.map(r => parseWaferId(r.waferId) -> WaferClassResultConv.fromProto(r)).toMap
+          val measuredSet = p.measuredWafers.map(parseWaferId).toSet
+          p.waferIds.map(IdConv.fromProto).zipWithIndex.map { case (id, idx) =>
+            val cls = classMap.get(id)
+            id -> WaferState(
+              name = s"WAFER-${idx + 1}",
+              classification = cls.map(_.classification),
+              reworkCount = cls.map(_.reworkCount).getOrElse(0),
+              cdValue = cls.map(_.cdValueNm),
+              measured = measuredSet.contains(id)
+            )
+          }.toMap
+      }
       LotState(
         lotId = IdConv.fromProto(p.lotId),
         productId = p.productId,
         wafers = waferEntries,
         reservedWafers = fromProtoMap(p.reservedWafers, IdConv, WaferIdSetConv),
+        reservedWaferNames = fromProtoMap(p.reservedWaferNames, IdConv, WaferNameSetConv),
         incomingWafers = fromProtoMap(p.incomingWafers, IdConv, WaferIdSetConv),
+        incomingCarriedWafers = fromProtoMap(p.incomingCarriedWafers, IdConv, WaferStateMapConv),
         phase = parsePhase(p.phase),
         completedTransferIds = p.completedTransferIds.map(IdConv.fromProto).toSet,
-        loadedFoupId = if (p.loadedFoupId.isEmpty) None else Some(p.loadedFoupId),
+        loadedFoupId = p.options match {
+          case Some(options) => options.loadedFoupId.map(_.value)
+          case None => if (p.loadedFoupId.isEmpty) None else Some(p.loadedFoupId)
+        },
         parentLotId = if (p.parentLotId.isEmpty) None else Some(IdConv.fromProto(p.parentLotId)),
         splitReason = stringToSplitReason(p.splitReason),
-        workOrderId = if (p.workOrderId.isEmpty) None else Some(p.workOrderId)
+        routeCard = p.routeCard.map(RouteCardConv.fromProto),
+        workOrderId = p.options match {
+          case Some(options) => options.workOrderId.map(_.value)
+          case None => if (p.workOrderId.isEmpty) None else Some(p.workOrderId)
+        }
       )
     }
 

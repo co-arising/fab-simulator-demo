@@ -1401,7 +1401,7 @@ class FabDemoService @Inject()(
     // Create WorkOrder aggregate
     val workOrderRef = sharding.entityRefFor(WorkOrderAggregate.WorkOrderEntityTypeKey, workOrderId)
     workOrderRef.ask[WorkOrderConfirmation](replyTo => CreateWorkOrder(scenarioId, scenario.waferIds, routeRef = None, replyTo = replyTo))
-      .map { confirmation =>
+      .flatMap { confirmation =>
         // Create shared equipment adapter and spawn simulators with fault probability
         val adapter = new ActorEquipmentAdapter()
         m35Adapter = Some(adapter)
@@ -1423,32 +1423,23 @@ class FabDemoService @Inject()(
         val sourceLotId: Id = UUID.nameUUIDFromBytes(s"$workOrderId-source-lot".getBytes)
         val lotRef = sharding.entityRefFor(LotEntityTypeKey, sourceLotId.toString)
 
-        lotRef.ask[LotConfirmation](ref => CreateLot(s"FAB-$workOrderId", waferUUIDs.map(_.swap), ref, workOrderId = Some(workOrderId)))
-
-        // Send StartExecution via ask — wait for Accepted before scheduling crash
-        // to guarantee the actor is in Executing state (not Idle) when StopPipeline arrives.
-        // NOTE: StartExecution.scenarioId is the CRASH-RECOVERY key — it must resolve, via
-        // ApplicationBootstrap.pipelineStageResolver, to the SAME stage list as `stages`.
-        // The legacy route id ("photo-cell-5wafer") resolves to a different (M3.0) list,
-        // which made post-crash recovery resume an empty queue and instantly report success.
-        val pipelineRef = sharding.entityRefFor(FabPipelineExecutionActor.EntityKey, workOrderId)
-        pipelineRef.ask[FabPipelineExecutionActor.ExecutionReply](ref =>
-          FabPipelineExecutionActor.StartExecution(
-            scenarioId = scenarioType,
-            workOrderId = workOrderId,
-            initialState = initialState,
-            stages = stages,
-            ctx = ctx,
-            replyTo = ref
-          )
-        ).foreach {
-          case FabPipelineExecutionActor.Accepted =>
-            scheduleAutoCrash(workOrderId, publisher, delaySeconds = 15)
-          case FabPipelineExecutionActor.Rejected(reason) =>
-            system.log.warn(s"StartExecution rejected for $workOrderId: $reason")
-        }(ec)
-
-        confirmation
+        lotRef.ask[LotConfirmation](ref => CreateLot(s"FAB-$workOrderId", waferUUIDs.map(_.swap), ref,
+          workOrderId = Some(workOrderId))).flatMap { created =>
+          created.error match {
+            case Some(error) => Future.failed(error)
+            case None =>
+              val pipelineRef = sharding.entityRefFor(FabPipelineExecutionActor.EntityKey, workOrderId)
+              pipelineRef.ask[FabPipelineExecutionActor.ExecutionReply](ref =>
+                FabPipelineExecutionActor.StartExecution(scenarioType, workOrderId, initialState, stages, ctx, ref))
+                .flatMap {
+                  case FabPipelineExecutionActor.Accepted =>
+                    scheduleAutoCrash(workOrderId, publisher, delaySeconds = 15)
+                    Future.successful(confirmation)
+                  case FabPipelineExecutionActor.Rejected(reason) =>
+                    Future.failed(new IllegalStateException(s"StartExecution rejected for $workOrderId: $reason"))
+                }
+          }
+        }
       }(ec)
   }
 
@@ -1609,20 +1600,55 @@ class FabDemoService @Inject()(
     }
   }
 
-  /** Return recovery status for a work order. For P1, returns a stub response. */
-  def getRecoveryStatus(workOrderId: String): Map[String, Any] = {
-    Map(
-      "workOrderId" -> workOrderId,
-      "status" -> "IDLE",
-      "recoveryCount" -> 0,
-      "lastRecoveryTimeMs" -> 0,
-      "phasesSkipped" -> 0,
-      "eventsReplayed" -> 0
-    )
+  private def pipelineEvents(workOrderId: String): akka.stream.scaladsl.Source[FabPipelineExecutionActor.Event, akka.NotUsed] = {
+    val plugin = system.settings.config.getString("fab.persistence.read-journal-plugin-id")
+    val journal = akka.persistence.query.PersistenceQuery(system)
+      .readJournalFor[akka.persistence.query.scaladsl.ReadJournal with
+        akka.persistence.query.scaladsl.CurrentEventsByPersistenceIdQuery](plugin)
+    journal.currentEventsByPersistenceId(s"${FabPipelineExecutionActor.EntityKey.name}|$workOrderId", 1L, Long.MaxValue)
+      .map { envelope => envelope.event match {
+        case event: FabPipelineExecutionActor.Event => event
+        case other => throw new IllegalArgumentException(s"Unsupported pipeline journal event: ${other.getClass.getName}")
+      }}
   }
 
-  /** Return fault history for a work order. For P1, returns a stub response. */
-  def getFaultHistory(workOrderId: String): Seq[Map[String, Any]] = {
-    Seq.empty
+  /** Query the actual actor state. A stopped run requiring reconciliation must
+    * not look like an idle or still-running pipeline. */
+  def getRecoveryStatus(workOrderId: String): Future[Map[String, Any]] = {
+    import akka.actor.typed.scaladsl.AskPattern._
+    import FabPipelineExecutionActor._
+    val ref = sharding.entityRefFor(EntityKey, workOrderId)
+    ref.ask[State](GetExecutionState).map { state =>
+      val (status, completed, detail) = state match {
+        case Idle => ("NOT_FOUND", 0, "No accepted execution")
+        case e: Executing => ("EXECUTING", e.completedCount, "")
+        case Completed(_, _) => ("COMPLETED", 0, "")
+        case Failed(phase, reason) => ("FAILED", 0, s"$phase: $reason")
+        case AwaitingRecovery(e, phase, error, _) => ("RECOVERY_REQUIRED", e.completedCount, s"$phase: ${error.errorCode}: ${error.detail}")
+        case RestoredExecution(e, _) => ("EXECUTING", e.completedCount, "")
+      }
+      Map("workOrderId" -> workOrderId, "status" -> status, "completedPhases" -> completed,
+        "detail" -> detail, "recoveryMetricsAvailable" -> false)
+    }
+  }
+
+  /** Failures come from the domain journal, not the volatile UI event stream. */
+  def getFaultHistory(workOrderId: String): Future[Seq[Map[String, Any]]] = {
+    implicit val mat: akka.stream.Materializer = akka.stream.Materializer(system)
+    import FabPipelineExecutionActor._
+    pipelineEvents(workOrderId).runFold(Vector.empty[Map[String, Any]]) { (history, event) =>
+      event match {
+        case StageFailed(phase, error, timestamp) => history :+ Map(
+          "workOrderId" -> workOrderId, "equipmentId" -> error.equipId.getOrElse(""),
+          "faultType" -> error.errorCode, "phaseName" -> phase, "resolved" -> false, "timestamp" -> timestamp)
+        case RecoveryRequired(phase, error, timestamp) => history :+ Map(
+          "workOrderId" -> workOrderId, "equipmentId" -> error.equipId.getOrElse(""),
+          "faultType" -> error.errorCode, "phaseName" -> phase, "resolved" -> false, "timestamp" -> timestamp)
+        case OcapHandled(phase, _, _, _) => history.map { entry =>
+          if (entry("phaseName") == phase) entry.updated("resolved", true) else entry
+        }
+        case _ => history
+      }
+    }
   }
 }

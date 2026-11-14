@@ -14,6 +14,8 @@ import net.imadz.application.services.transactor.{AppSagaContext, FabSagaDefinit
 import net.imadz.common.CommonTypes.Id
 import net.imadz.fab.protocol.ActorEquipmentAdapter
 
+import org.slf4j.LoggerFactory
+
 import java.util.UUID
 import javax.inject.{Inject, Singleton}
 import scala.concurrent.{ExecutionContext, Future}
@@ -26,6 +28,7 @@ import scala.concurrent.{ExecutionContext, Future}
 class ApplicationBootstrap @Inject()(
                                       // Play 默认注入的是 Classic ActorSystem，我们需要转换
                                       classicSystem: akka.actor.ActorSystem,
+                                      jdbcBootstrap: FabJdbcBootstrap,
                                       sharding: ClusterSharding,
                                       // 注入各个 Bootstrap 所需的 Repository
                                       lotRepository: LotRepository,
@@ -72,7 +75,10 @@ class ApplicationBootstrap @Inject()(
 
   // --- 8. 初始化银行批量充值+申购演示（ChainExecutionActor 分片 + Monarch 六阶段双链）---
 
-  println("🚀 [ApplicationBootstrap] All CQRS components initialized successfully.")
+  LoggerFactory.getLogger(getClass).info(
+    "CQRS components initialized; write journal={}, read journal={}",
+    system.settings.config.getString("fab.persistence.write-journal-plugin-id"),
+    system.settings.config.getString("fab.persistence.read-journal-plugin-id"))
 
   // ====================================================================
   // FabPipelineExecutionActor recovery factories

@@ -6,7 +6,6 @@ import akka.cluster.sharding.typed.scaladsl.{ClusterSharding, ShardedDaemonProce
 import akka.persistence.query.PersistenceQuery
 import akka.persistence.query.scaladsl.{CurrentEventsByPersistenceIdQuery, ReadJournal}
 import akka.projection.ProjectionBehavior
-import akka.contrib.persistence.mongodb.MongoReadJournal
 import net.imadz.application.projection.SagaBusinessEventProjection
 import net.imadz.infra.saga.SagaTransactionCoordinator
 
@@ -14,7 +13,8 @@ trait SagaBusinessEventProjectionBootstrap extends SagaEngineBootstrap {
 
   def initSagaBusinessEventProjection(system: ActorSystem[_], sharding: ClusterSharding): Unit = {
     val readJournal = PersistenceQuery(system.classicSystem)
-      .readJournalFor[ReadJournal with CurrentEventsByPersistenceIdQuery](MongoReadJournal.Identifier)
+      .readJournalFor[ReadJournal with CurrentEventsByPersistenceIdQuery](
+        system.settings.config.getString("fab.persistence.read-journal-plugin-id"))
 
     ShardedDaemonProcess(system).init(
       name = SagaBusinessEventProjection.projectionName,

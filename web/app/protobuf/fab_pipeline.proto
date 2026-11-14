@@ -1,0 +1,118 @@
+syntax = "proto3";
+
+package net.imadz.infrastructure.proto;
+
+import "fab_run_state.proto";
+
+// Parent domain journal/snapshots. Runtime commands, contexts, ActorRefs and
+// closures are deliberately excluded. Field numbers must never be reused.
+message FabPipelineEventProto {
+  oneof event {
+    FabPipelineStartedProto started = 1;
+    FabPipelineStageStartedProto stage_started = 2;
+    FabPipelineStageCompletedProto stage_completed = 3;
+    FabPipelineStageFailedProto stage_failed = 4;
+    FabPipelineOcapHandledProto ocap_handled = 5;
+    FabPipelineStageProgressProto stage_progress = 6;
+    FabPipelineAllCompletedProto all_completed = 7;
+    FabPipelineExecutionFailedProto execution_failed = 8;
+    FabPipelineRecoveryRequiredProto recovery_required = 9;
+    FabPipelineStartedWithInputProto started_with_input = 10;
+  }
+}
+
+message FabPipelineStartedWithInputProto {
+  string scenario_id = 1;
+  string work_order_id = 2;
+  FabDemoStateProto initial_state = 3;
+  repeated string plan = 4;
+  bytes plan_bytes = 5;
+}
+
+message FabPipelineStartedProto {
+  string scenario_id = 1;
+  string work_order_id = 2;
+  int32 stage_count = 3;
+}
+message FabPipelineStageStartedProto {
+  string phase = 1;
+  int64 timestamp = 2;
+}
+message FabPipelineStageCompletedProto {
+  string phase = 1;
+  int64 timestamp = 2;
+  map<string, string> metadata = 3;
+  FabDemoStateProto fab_state = 4; // presence preserves Some/None
+}
+message FabPipelineStageFailedProto {
+  string phase = 1;
+  StageErrorProto error = 2;
+  int64 timestamp = 3;
+}
+message FabPipelineOcapHandledProto {
+  string phase = 1;
+  StageErrorProto error = 2;
+  int64 timestamp = 3;
+  FabDemoStateProto fab_state = 4;
+}
+message FabPipelineStageProgressProto {
+  string status = 1;
+  string detail = 2;
+  string phase = 3;
+  int64 timestamp = 4;
+}
+message FabPipelineAllCompletedProto {
+  string scenario_id = 1;
+  string work_order_id = 2;
+  int32 total_wafers = 3;
+  int32 passed_wafers = 4;
+  int32 reworked_wafers = 5;
+  int32 scrapped_wafers = 6;
+}
+message FabPipelineExecutionFailedProto {
+  string phase = 1;
+  string reason = 2;
+}
+
+message FabPipelineRecoveryRequiredProto {
+  string phase = 1;
+  StageErrorProto error = 2;
+  int64 timestamp = 3;
+}
+
+message FabPipelineStateProto {
+  oneof state {
+    FabPipelineIdleProto idle = 1;
+    FabPipelineExecutingProto executing = 2;
+    FabPipelineCompletedProto completed = 3;
+    FabPipelineFailedProto failed = 4;
+    FabPipelineAwaitingRecoveryProto awaiting_recovery = 5;
+    FabPipelineRestoredExecutionProto restored_execution = 6;
+  }
+}
+message FabPipelineIdleProto {}
+message FabPipelineExecutingProto {
+  string scenario_id = 1;
+  string work_order_id = 2;
+  repeated string completed_phases = 3;
+  int32 stage_count = 4;
+  FabDemoStateProto fab_state = 5;
+}
+message FabPipelineRestoredExecutionProto {
+  FabPipelineExecutingProto execution = 1;
+  bytes plan_bytes = 2;
+}
+message FabPipelineAwaitingRecoveryProto {
+  FabPipelineExecutingProto execution = 1;
+  string phase = 2;
+  StageErrorProto error = 3;
+  bytes plan_bytes = 4;
+}
+message FabPipelineCompletedProto {
+  string scenario_id = 1;
+  string work_order_id = 2;
+}
+message FabPipelineFailedProto {
+  string phase = 1;
+  string reason = 2;
+}

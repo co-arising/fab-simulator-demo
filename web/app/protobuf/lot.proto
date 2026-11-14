@@ -15,6 +15,44 @@ message IntEntry {
   int32 value = 2;
 }
 
+// Message presence preserves Some("") and Some(0.0), not just non-default values.
+message LotStringValuePO {
+  string value = 1;
+}
+
+message LotDoubleValuePO {
+  double value = 1;
+}
+
+message WaferStateOptionsPO {
+  LotStringValuePO classification = 1;
+  LotDoubleValuePO cd_value = 2;
+}
+
+message LotStateOptionsPO {
+  LotStringValuePO loaded_foup_id = 1;
+  LotStringValuePO work_order_id = 2;
+}
+
+message WaferNameSetPO {
+  repeated string wafer_names = 1;
+}
+
+// Also used as a singular field: present + empty means an authoritative empty
+// wafer map, whereas absent means a legacy snapshot with only derived fields.
+message WaferStateMapPO {
+  map<string, WaferStatePO> wafers = 1;
+}
+
+// LotEntity.RouteCard stores ordered string identifiers, not POR step objects.
+message LotRouteCardPO {
+  repeated string steps = 1;
+  int32 current_step_index = 2;
+  LotStringValuePO sourced_from = 3;
+  string reason = 4;
+  int64 assigned_at = 5;
+}
+
 // --- WaferClassResult sub-message ---
 
 message WaferClassResultPO {
@@ -65,6 +103,9 @@ message WaferStatePO {
   int32 rework_count = 5;
   double cd_value = 6;
   bool measured = 7;
+  // Absent: legacy scalar decoding. Present: exact Option values (including
+  // Some(0.0), Some(""), or None independently of the measured flag).
+  WaferStateOptionsPO options = 8;
 }
 
 message WaferAdditionReservedPO {
@@ -191,6 +232,17 @@ message LotFailedPO {
   string failed_at = 2;
 }
 
+message RouteCardAssignedPO {
+  repeated string steps = 1;
+  LotStringValuePO sourced_from = 2;
+  string reason = 3;
+  int64 assigned_at = 4;
+}
+
+message RouteCardStepAdvancedPO {
+  int32 step_index = 1;
+}
+
 // --- Event Union ---
 
 message LotEventPO {
@@ -223,6 +275,8 @@ message LotEventPO {
     SubLotCreatedPO subLotCreated = 26;
     SubLotMergedPO subLotMerged = 27;
     SubLotScrappedPO subLotScrapped = 28;
+    RouteCardAssignedPO routeCardAssigned = 29;
+    RouteCardStepAdvancedPO routeCardStepAdvanced = 30;
   }
 }
 
@@ -246,4 +300,10 @@ message LotStatePO {
   string parent_lot_id = 15;
   string split_reason = 16;
   string work_order_id = 17;
+  // Append-only lossless state; legacy fields 1–17 remain available to old readers.
+  WaferStateMapPO wafer_states = 18;
+  map<string, WaferNameSetPO> reserved_wafer_names = 19;
+  map<string, WaferStateMapPO> incoming_carried_wafers = 20;
+  LotRouteCardPO route_card = 21;
+  LotStateOptionsPO options = 22;
 }

@@ -106,7 +106,10 @@ abstract class EquipmentSimulator {
       replyTo ! JobFailed(jobId, state.equipmentId, "ABORTED", reason)
       idle(state.copy(status = Idle, currentJob = None, totalFailed = state.totalFailed + 1), config, timers)
 
-    case SimulateCommand(QueryStatus(), replyTo) =>
+    // Abort keeps its existing semantics. All other external commands (including
+    // ProcessRecipe/LoadFoup/UnloadFoup) get a snapshot instead of being swallowed;
+    // this rejection must not alter the current job or its completion timer.
+    case SimulateCommand(_, replyTo) =>
       replyTo ! StatusReport(state.equipmentId, Busy, state.currentJob.map(_.jobId), state.portOccupancy)
       Behaviors.same
 

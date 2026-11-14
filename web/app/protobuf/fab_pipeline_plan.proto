@@ -1,0 +1,183 @@
+syntax = "proto3";
+
+package net.imadz.infrastructure.proto;
+
+import "fab_run_state.proto";
+
+option java_multiple_files = true;
+
+// Immutable input plan, not an execution checkpoint. Field numbers and the
+// explicitly mapped string codes below are the durable contract; never reuse
+// them. No runtime context, function, ActorRef or class name is serialized.
+message FabPipelinePlanProto {
+  uint32 schema_version = 1;
+  repeated FabPipelinePlanStageProto stages = 2;
+}
+
+message FabPipelinePlanStageProto {
+  // Legacy Branch(Function1, ...) deliberately has NO wire representation.
+  // Data-only ConditionalBranch uses its own tag; never serialize a predicate.
+  reserved 17;
+  oneof stage {
+    FabPlanMarkerProto load_foup = 1;
+    FabPlanTransportProto transport = 2;
+    FabPlanAtEquipmentProto at_equipment = 3;
+    FabPlanEquipmentPortProto track_in = 4;
+    FabPlanRecipeProto run_recipe = 5;
+    FabPlanEquipmentPortProto track_out = 6;
+    FabPlanEquipmentProto measure = 7;
+    FabPlanMarkerProto classify = 8;
+    FabPlanLotKeyProto saga_split = 9;
+    FabPlanLotKeyProto saga_merge = 10;
+    FabPlanMarkerProto scrap_wafers = 11;
+    FabPlanMarkerProto hold_wafers = 12;
+    FabPlanMarkerProto release_wafers = 13;
+    FabPlanMarkerProto post_release_classify = 14;
+    FabPlanWaitProto wait_for_review = 15;
+    FabPlanMarkerProto seal_complete = 16;
+    FabPlanMarkerProto pilot_sub_flow = 18;
+    FabPlanOcapRulesProto ocap_evaluate = 19;
+    FabPlanSubProcessRefProto execute_sub_process = 20;
+    FabPlanOcapRulesProto m35_classify_with_ocap = 21;
+    FabPlanMarkerProto ocap_action_router = 22;
+    FabPlanLotKeyProto await_sub_lot_result = 23;
+    FabPlanMarkerProto photo_cell_rework_pipeline = 24;
+    FabPlanDynamicPorProto dynamic_por_execution = 25;
+    FabPlanConditionalBranchProto conditional_branch = 26;
+  }
+}
+
+// These numeric codes are part of the durable contract. UNSPECIFIED and every
+// unrecognized value must fail decoding; neither means an always-false branch.
+enum FabPlanNamedConditionProto {
+  FAB_PLAN_NAMED_CONDITION_UNSPECIFIED = 0;
+  PILOT_PASSED = 1;
+  REVIEW_APPROVED = 2;
+}
+message FabPlanConditionalBranchProto {
+  FabPlanNamedConditionProto condition = 1;
+  repeated FabPipelinePlanStageProto if_true = 2;
+  repeated FabPipelinePlanStageProto if_false = 3;
+}
+
+message FabPlanMarkerProto {}
+message FabPlanTransportProto {
+  string from = 1;
+  string to = 2;
+}
+message FabPlanAtEquipmentProto {
+  string area = 1;
+  string equipment_id = 2;
+}
+message FabPlanEquipmentPortProto {
+  string equipment_id = 1;
+  string port_id = 2;
+}
+message FabPlanRecipeProto {
+  string equipment_id = 1;
+  string recipe_id = 2;
+}
+message FabPlanEquipmentProto {
+  string equipment_id = 1;
+}
+message FabPlanLotKeyProto {
+  string lot_key = 1;
+}
+message FabPlanWaitProto {
+  int64 duration_ms = 1;
+}
+
+message FabPlanOcapRulesProto {
+  repeated FabPlanOcapRuleProto rules = 1;
+}
+message FabPlanOcapRuleProto {
+  string rule_id = 1;
+  string name = 2;
+  FabPlanConditionProto trigger_condition = 3;
+  // Reuse the run-state OCAP action ADT rather than inventing an action format.
+  OcapActionPlanProto action_plan = 4;
+  int32 priority = 5;
+  int32 max_triggers_per_lot = 6;
+  // CONSERVATIVE_PASS | CONSERVATIVE_REJECT. Unknown codes must be rejected.
+  string on_missing_metric = 7;
+  string route_id = 8;
+}
+
+message FabPlanConditionProto {
+  oneof condition {
+    FabPlanMeasurementConditionProto measurement = 1;
+    FabPlanAggregateConditionProto aggregate = 2;
+    FabPlanEquipmentConditionProto equipment = 3;
+  }
+}
+message FabPlanMeasurementConditionProto {
+  string metric = 1;
+  // GT | GE | LT | LE | WITHIN_RANGE | OUTSIDE_RANGE
+  string operator = 2;
+  // IEEE-754 bits preserve signed zero as well as all finite threshold values.
+  fixed64 lower_bound_bits = 3;
+  fixed64 upper_bound_bits = 4;
+  FabPlanWaferScopeProto wafer_scope = 5;
+}
+message FabPlanAggregateConditionProto {
+  repeated FabPlanConditionProto conditions = 1;
+  // AND | OR | NOT
+  string logic = 2;
+}
+message FabPlanEquipmentConditionProto {
+  string equipment_id = 1;
+  string metric = 2;
+  string operator = 3;
+  fixed64 lower_bound_bits = 4;
+  fixed64 upper_bound_bits = 5;
+}
+message FabPlanWaferScopeProto {
+  oneof scope {
+    FabPlanMarkerProto all_wafers = 1;
+    FabPlanMarkerProto any_wafer = 2;
+    FabPlanSlotRangeProto slot_range = 3;
+  }
+}
+message FabPlanSlotRangeProto {
+  int32 from = 1;
+  int32 to = 2;
+}
+
+message FabPlanSubProcessRefProto {
+  string node_id = 1;
+  string label = 2;
+  // SEND_AHEAD_PILOT | REWORK_LOOP | HOLD_RELEASE | SAMPLING | SCRAP_DOWNGRADE
+  string sub_process_type = 3;
+  map<string, string> params = 4;
+}
+
+message FabPlanDynamicPorProto {
+  FabPlanPorProto routing = 1;
+  FabPlanDecisionProto spec = 2;
+}
+message FabPlanPorProto {
+  string product_id = 1;
+  repeated FabPlanPorStepProto steps = 2;
+  int32 version = 3;
+  bool merge_before_warehouse = 4;
+}
+message FabPlanPorStepProto {
+  string step_id = 1;
+  // EquipmentArea.areaId, resolved through its public byId API, never a class name.
+  string equipment_area_id = 2;
+  string recipe_id = 3;
+  // Preserve the original duration length/unit; milliseconds would be lossy.
+  int64 duration_length = 4;
+  // NANOSECONDS | MICROSECONDS | MILLISECONDS | SECONDS | MINUTES | HOURS | DAYS
+  string duration_unit = 5;
+  int32 max_retries = 6;
+  repeated string fallback_area_ids = 7;
+  int32 reentry_index = 8;
+}
+message FabPlanDecisionProto {
+  fixed64 lower_spec_nm_bits = 1;
+  fixed64 upper_spec_nm_bits = 2;
+  fixed64 borderline_window_nm_bits = 3;
+  int32 max_rework_count = 4;
+  string rework_recipe_id = 5;
+}

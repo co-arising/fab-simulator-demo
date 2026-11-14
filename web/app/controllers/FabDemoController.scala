@@ -9,7 +9,6 @@ import akka.persistence.query.{PersistenceQuery, Sequence}
 import akka.persistence.query.scaladsl.{CurrentEventsByPersistenceIdQuery, ReadJournal}
 import akka.stream.Materializer
 import akka.stream.scaladsl.{BroadcastHub, Flow, Keep, MergeHub, Sink, Source}
-import akka.contrib.persistence.mongodb.MongoReadJournal
 import net.imadz.domain.events.{DomainEventRecorded, FabSimulationEvent, RecoveryEvent, FaultInjected, DynamicStageInjected, PipelineTimelineSnapshot}
 import net.imadz.application.actor.EquipmentAreaActor
 import net.imadz.application.services.FabDemoService
@@ -413,21 +412,20 @@ class FabDemoController @Inject()(
   }
 
   /** Get recovery status for a work order. */
-  def m35RecoveryStatus(id: String) = Action {
-    val status = fabDemoService.getRecoveryStatus(id)
-    Ok(Json.obj(
-      "workOrderId" -> status.getOrElse("workOrderId", "").toString,
-      "status" -> status.getOrElse("status", "").toString,
-      "recoveryCount" -> (status.getOrElse("recoveryCount", 0) match { case i: Int => i; case s => s.toString.toInt }),
-      "lastRecoveryTimeMs" -> (status.getOrElse("lastRecoveryTimeMs", 0L) match { case l: Long => l; case i: Int => i.toLong; case s => s.toString.toLong }),
-      "phasesSkipped" -> (status.getOrElse("phasesSkipped", 0) match { case i: Int => i; case s => s.toString.toInt }),
-      "eventsReplayed" -> (status.getOrElse("eventsReplayed", 0) match { case i: Int => i; case s => s.toString.toInt })
-    ))
+  def m35RecoveryStatus(id: String) = Action.async {
+    fabDemoService.getRecoveryStatus(id).map { status =>
+      Ok(Json.obj("workOrderId" -> id, "status" -> status("status").toString,
+        "completedPhases" -> status("completedPhases").asInstanceOf[Int],
+        "detail" -> status("detail").toString, "recoveryMetricsAvailable" -> false))
+    }.recover { case scala.util.control.NonFatal(ex) =>
+      ServiceUnavailable(Json.obj("workOrderId" -> id, "status" -> "UNAVAILABLE",
+        "error" -> play.api.libs.json.JsString(Option(ex.getMessage).getOrElse("Execution status unavailable"))))
+    }
   }
 
   /** Get fault history for a work order. */
-  def m35FaultHistory(id: String) = Action {
-    val history = fabDemoService.getFaultHistory(id)
+  def m35FaultHistory(id: String) = Action.async {
+    fabDemoService.getFaultHistory(id).map { history =>
     val jsonArr = history.map { h =>
       Json.obj(
         "workOrderId" -> h.getOrElse("workOrderId", "").toString,
@@ -439,13 +437,18 @@ class FabDemoController @Inject()(
       )
     }
     Ok(Json.toJson(jsonArr))
+    }.recover { case scala.util.control.NonFatal(ex) =>
+      ServiceUnavailable(Json.obj("error" -> play.api.libs.json.JsString(Option(ex.getMessage).getOrElse("Fault history unavailable"))))
+    }
   }
 
   // ====================================================================
   // Timeline Query — git-branch-style event replay from journal
   // ====================================================================
 
-  private val readJournal = PersistenceQuery(classicSystem).readJournalFor[ReadJournal with CurrentEventsByPersistenceIdQuery](MongoReadJournal.Identifier)
+  private val readJournal = PersistenceQuery(classicSystem)
+    .readJournalFor[ReadJournal with CurrentEventsByPersistenceIdQuery](
+      classicSystem.settings.config.getString("fab.persistence.read-journal-plugin-id"))
   private val lotEventAdapter = new LotEventAdapter()
 
   /** Render the timeline query page. */
@@ -654,6 +657,18 @@ class FabDemoController @Inject()(
   private def pipelineEventToEntry(timestamp: Long, evt: FabPipelineExecutionActor.Event): Option[TimelineEntry] = evt match {
     case FabPipelineExecutionActor.Started(scenarioId, woId, stageCount) =>
       Some(TimelineEntry(timestamp, "pipeline", "Started", s"scenario=$scenarioId, stages=$stageCount"))
+    case FabPipelineExecutionActor.StartedWithInput(scenarioId, _, _, plan, _) =>
+      Some(TimelineEntry(timestamp, "pipeline", "Started", s"scenario=$scenarioId, stages=${plan.size}"))
+    case FabPipelineExecutionActor.StageStarted(phase, _) =>
+      Some(TimelineEntry(timestamp, "pipeline", "StageStarted", phase))
+    case FabPipelineExecutionActor.StageFailed(phase, error, _) =>
+      Some(TimelineEntry(timestamp, "pipeline", "StageFailed", s"$phase: ${error.errorCode}"))
+    case FabPipelineExecutionActor.OcapHandled(phase, error, _, _) =>
+      Some(TimelineEntry(timestamp, "pipeline", "OcapHandled", s"$phase: ${error.errorCode}"))
+    case FabPipelineExecutionActor.StageProgress(status, detail, phase, _) =>
+      Some(TimelineEntry(timestamp, "pipeline", "StageProgress", s"$phase: $status — $detail"))
+    case FabPipelineExecutionActor.RecoveryRequired(phase, error, _) =>
+      Some(TimelineEntry(timestamp, "pipeline", "RecoveryRequired", s"$phase: ${error.errorCode} — ${error.detail}"))
     case FabPipelineExecutionActor.StageCompleted(phase, ts, metadata, _) =>
       Some(TimelineEntry(timestamp, "pipeline", s"StageCompleted", s"$phase"))
     case FabPipelineExecutionActor.AllCompleted(scenarioId, woId, _, _, _, _) =>

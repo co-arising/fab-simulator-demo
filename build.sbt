@@ -10,7 +10,10 @@ val akkaVersion = "2.6.20"
 val ScalikeJdbcVersion = "3.5.0"
 val MongoPluginVersion = "3.0.8"
 
-ThisBuild / resolvers ++= Seq(
+// Opt in to an unpublished Monarch candidate Maven repository (also used by Bank).
+ThisBuild / resolvers ++= sys.props.get("monarch.repository").toSeq.map { repository =>
+  "monarch-candidate" at repository
+} ++ Seq(
   "Aliyun" at "https://maven.aliyun.com/repository/public/"
 )
 
@@ -42,13 +45,14 @@ lazy val web = (project in file("web"))
     publish / skip := true,
     libraryDependencies ++= Seq(
       "net.imadz" %% "common-core" % "0.2",
-      "net.imadz" %% "monarch-core" % "0.2",
-      "net.imadz" %% "monarch-persistence" % "0.2",
+      "net.imadz" %% "monarch-core" % "0.2.1",
+      "net.imadz" %% "monarch-persistence" % "0.2.1",
       "net.imadz" %% "saga-core" % "0.2",
       "com.typesafe.akka" %% "akka-actor-typed" % akkaVersion,
       "com.typesafe.akka" %% "akka-stream" % akkaVersion,
       "com.typesafe.akka" %% "akka-persistence-typed" % akkaVersion,
       "com.typesafe.akka" %% "akka-persistence-query" % akkaVersion,
+      "org.iq80.leveldb" % "leveldb" % "0.12",
       "com.typesafe.akka" %% "akka-cluster-sharding-typed" % akkaVersion,
       "com.lightbend.akka" %% "akka-projection-eventsourced" % "1.2.5",
       "com.lightbend.akka" %% "akka-projection-core" % "1.2.5",
@@ -56,8 +60,11 @@ lazy val web = (project in file("web"))
       "org.mongodb.scala" %% "mongo-scala-driver" % "4.3.4",
       "org.scalikejdbc" %% "scalikejdbc" % ScalikeJdbcVersion,
       "org.scalikejdbc" %% "scalikejdbc-config" % ScalikeJdbcVersion,
+      "com.h2database" % "h2" % "2.2.224" % Runtime,
       "com.thesamet.scalapb" %% "scalapb-runtime" % "0.11.14",
       guice,
+      "com.typesafe.akka" %% "akka-actor-testkit-typed" % akkaVersion % Test,
+      "com.typesafe.akka" %% "akka-persistence-testkit" % akkaVersion % Test,
       "org.scalatestplus.play" %% "scalatestplus-play" % "5.1.0" % Test
     ),
     Compile / PB.targets := Seq(
