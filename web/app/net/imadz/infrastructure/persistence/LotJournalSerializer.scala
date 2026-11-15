@@ -6,7 +6,7 @@ import net.imadz.infrastructure.proto.lot.LotEventPO
 /** ScalaPB oneof values are not GeneratedMessage. Preserve the existing event
   * adapter's oneof journal type by encoding it in its protobuf envelope. */
 final class LotJournalSerializer extends SerializerWithStringManifest {
-  override val identifier: Int = 77102123
+  override val identifier: Int = 77102301
 
   override def manifest(value: AnyRef): String = value match {
     case _: LotEventPO.Event => "lot-event-v1"

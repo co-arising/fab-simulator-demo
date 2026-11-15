@@ -21,6 +21,11 @@ M3.5 自愈演示。
 
 ## 运行
 
+Lot journal 使用应用独立序列化编号 `77102301`，`77102123` 留给 Monarch
+运行协议。payload 仍为 `lot-event-v1`，但不提供旧 Lot journal 的迁移或读取兼容。
+本检出须使用全新、独占的 journal、snapshot 和读模型目录；旧存储原样保留，
+即使仍使用默认 0.2.1 依赖也不能直接复用旧目录。
+
 ```bash
 sbt "web / run"
 ```

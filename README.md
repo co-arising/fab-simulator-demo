@@ -21,6 +21,12 @@ The `web` module contains the full CQRS stack extracted from playAkkaCQRS
 
 ## Run it
 
+Lot journal records now use application serializer ID `77102301`; `77102123`
+belongs to Monarch's run protocol. The payload remains `lot-event-v1`, but old
+Lot journals are **not** migrated or readable through the new ID. Use fresh,
+exclusive journal, snapshot, and read-model directories for this checkout;
+keep previous storage untouched, including when running the default 0.2.1 pins.
+
 ```bash
 sbt "web / run"
 ```

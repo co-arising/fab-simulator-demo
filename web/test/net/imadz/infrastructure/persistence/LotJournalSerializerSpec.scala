@@ -56,7 +56,7 @@ class LotJournalSerializerSpec
   private def roundTripJournal(journal: LotEventPO.Event): LotEventPO.Event = {
     val serializer = serialization.findSerializerFor(journal)
     serializer shouldBe a[LotJournalSerializer]
-    serializer.identifier shouldBe 77102123
+    serializer.identifier shouldBe 77102301
     Serializers.manifestFor(serializer, journal) shouldBe wireManifest
     val bytes = serialization.serialize(journal).get
     // Array identity is irrelevant: compare protobuf bytes by content.
@@ -140,6 +140,17 @@ class LotJournalSerializerSpec
       Vector(classOf[LotJournalSerializer], classOf[LotEventAdapter], classOf[LotSnapshotAdapter],
         classOf[net.imadz.infrastructure.persistence.converters.LotProtoConverters], classOf[LotState])
         .foreach(clazz => info(s"Loaded ${clazz.getName} from ${clazz.getProtectionDomain.getCodeSource.getLocation}"))
+    }
+
+    "keep the Lot journal identifier separate from the public Monarch run protocol" in {
+      lotSerializer.identifier shouldBe 77102301
+      lotSerializer.identifier should not be 77102123
+      val config = system.settings.config
+      if (config.hasPath("akka.actor.serializers.monarch-run-wire")) {
+        val runSerializer = serialization.serializerByIdentity(77102123)
+        runSerializer.getClass.getName shouldBe config.getString("akka.actor.serializers.monarch-run-wire")
+        runSerializer.identifier should not be lotSerializer.identifier
+      }
     }
 
     "cover every current protobuf oneof tag without renumbering the old wire" in {

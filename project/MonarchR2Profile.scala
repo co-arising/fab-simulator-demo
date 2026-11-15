@@ -13,6 +13,9 @@ object MonarchR2Profile extends AutoPlugin {
 
   override def projectSettings: Seq[Def.Setting[_]] = Seq(
     libraryDependencies ++= (if (enabled) Seq("org.iq80.leveldb" % "leveldb" % "0.12") else Seq.empty),
+    Test / javaOptions ++= (ThisBuild / dependencyOverrides).value
+      .filter(m => m.organization == "net.imadz" && Set("monarch-core", "monarch-persistence")(m.name))
+      .map(m => s"-Dtest.${m.name}.version=${m.revision}"),
     Compile / unmanagedSources ~= (files => if (enabled) files else files.filterNot(durable)),
     Test / unmanagedSources ~= (files => if (enabled) files else files.filterNot(durable)),
     Compile / RoutesKeys.routesCompilerTasks ~= { tasks =>

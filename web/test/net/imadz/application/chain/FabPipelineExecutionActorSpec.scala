@@ -200,8 +200,10 @@ class FabPipelineExecutionActorSpec
       serialization.findSerializerFor(PersistentMonarch.Idle) shouldBe a[MonarchSerializer]
       val persistenceLocation = classOf[MonarchSerializer].getProtectionDomain.getCodeSource.getLocation.toString
       val coreLocation = classOf[net.imadz.monarch.AsyncCheckpointHooks[_, _]].getProtectionDomain.getCodeSource.getLocation.toString
-      persistenceLocation should endWith("/monarch-persistence_2.13-0.2.1.jar")
-      coreLocation should endWith("/monarch-core_2.13-0.2.1.jar")
+      val persistenceVersion = sys.props.getOrElse("test.monarch-persistence.version", "0.2.1")
+      val coreVersion = sys.props.getOrElse("test.monarch-core.version", "0.2.1")
+      persistenceLocation should endWith(s"/monarch-persistence_2.13-$persistenceVersion.jar")
+      coreLocation should endWith(s"/monarch-core_2.13-$coreVersion.jar")
       Option(System.getProperty("monarch.repository")).foreach { repository =>
         persistenceLocation should startWith(repository.stripSuffix("/"))
         coreLocation should startWith(repository.stripSuffix("/"))
@@ -216,7 +218,7 @@ class FabPipelineExecutionActorSpec
     }
   }
 
-  "FabPipelineExecutionActor with Monarch 0.2.1" should {
+  "FabPipelineExecutionActor with the selected Monarch artifacts" should {
     "complete actual measurement, classification and sealing with durable child checkpoints and parent snapshots" in {
       val f = new Fixture(Seq(Measure("CDSEM-01"), Classify, SealComplete))
       val parent = f.spawnParent()
