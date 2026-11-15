@@ -1,7 +1,6 @@
 package net.imadz.application.projection
 
 import akka.actor.typed.ActorSystem
-import akka.contrib.persistence.mongodb.MongoReadJournal
 import akka.persistence.query.Offset
 import akka.persistence.query.scaladsl.{CurrentEventsByPersistenceIdQuery, ReadJournal}
 import akka.projection.ProjectionId
@@ -42,7 +41,7 @@ object SagaBusinessEventProjection {
                        coordinatorPidPrefix: String): ExactlyOnceProjection[Offset, EventEnvelope[SagaTransactionCoordinatorEventPO]] = {
     val sourceProvider: SourceProvider[Offset, EventEnvelope[SagaTransactionCoordinatorEventPO]] = EventSourcedProvider
       .eventsByTag[SagaTransactionCoordinatorEventPO](system = system,
-        readJournalPluginId = MongoReadJournal.Identifier,
+        readJournalPluginId = system.settings.config.getString("fab.persistence.read-journal-plugin-id"),
         tag = SagaTransactionCoordinator.tags(index))
 
     JdbcProjection.exactlyOnce(

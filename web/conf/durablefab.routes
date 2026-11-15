@@ -1,0 +1,7 @@
+# Standalone additive router; it does not include or change the legacy Fab routes.
+GET     /fab/durable                           controllers.FabDurableWorkflowController.index()
+POST    /fab/durable/jobs/:jobId/start         controllers.FabDurableWorkflowController.start(jobId: String, count: Int ?= 2)
+GET     /fab/durable/jobs/:jobId               controllers.FabDurableWorkflowController.state(jobId: String)
+POST    /fab/durable/jobs/:jobId/reconcile     controllers.FabDurableWorkflowController.reconcile(jobId: String, batchId: String)
+GET     /fab/durable/jobs/:jobId/tasks         controllers.FabDurableWorkflowController.tasks(jobId: String)
+POST    /fab/durable/jobs/:jobId/complete      controllers.FabDurableWorkflowController.completeTask(jobId: String, operationKey: String)

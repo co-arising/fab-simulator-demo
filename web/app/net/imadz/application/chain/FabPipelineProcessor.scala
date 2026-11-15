@@ -44,6 +44,10 @@ object FabPipelineProcessor {
     case FabScenarioPipeline.WaitForReview(_)             => "WaitForReview"
     case FabScenarioPipeline.SealComplete                 => "SealComplete"
     case FabScenarioPipeline.Branch(_, _, _)              => "Branch"
+    case FabScenarioPipeline.ConditionalBranch(condition, _, _) => condition match {
+      case FabScenarioPipeline.PilotPassed    => "ConditionalBranch_PilotPassed"
+      case FabScenarioPipeline.ReviewApproved => "ConditionalBranch_ReviewApproved"
+    }
     case FabScenarioPipeline.PilotSubFlow                 => "PilotSubFlow"
     case FabScenarioPipeline.OcapEvaluate(_)              => "OcapEvaluate"
     case FabScenarioPipeline.OcapActionRouter             => "OcapActionRouter"

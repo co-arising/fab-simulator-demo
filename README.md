@@ -21,6 +21,12 @@ The `web` module contains the full CQRS stack extracted from playAkkaCQRS
 
 ## Run it
 
+Lot journal records now use application serializer ID `77102301`; `77102123`
+belongs to Monarch's run protocol. The payload remains `lot-event-v1`, but old
+Lot journals are **not** migrated or readable through the new ID. Use fresh,
+exclusive journal, snapshot, and read-model directories for this checkout;
+keep previous storage untouched, including when running the default 0.2.1 pins.
+
 ```bash
 sbt "web / run"
 ```
@@ -30,8 +36,47 @@ sbt "web / run"
 - M3.5 self-healing: http://localhost:9000/fab-demo/m35
 - M3.5 3D view: http://localhost:9000/fab-demo/m35-3d
 
-Requires MongoDB at `127.0.0.1:27017` (journal + read models); see
-`web/conf/application.conf`.
+The checked-in write journal is **local LevelDB**, with local snapshots; several
+projections instead query MongoDB at `127.0.0.1:27017`. Starting MongoDB alone does
+not reconcile those sources or initialize JDBC projection storage. Review
+`web/conf/application.conf` and the [validation limitations](VALIDATION-0.2.1.md)
+before treating the UI as an end-to-end recovery demonstration.
+
+## Monarch 0.2.1 candidate validation
+
+Only `monarch-core` and `monarch-persistence` are pinned to `0.2.1`;
+`common-core` and `saga-core` remain at `0.2`. No remote publication was performed.
+Until these Monarch artifacts are available from your normal repositories, opt
+in to an existing Maven-layout candidate repository with `-Dmonarch.repository`.
+The resolver is not enabled unless the property is supplied; it does not build
+or publish sibling projects.
+
+Validated local candidate (replace this URL on another machine)
+
+```bash
+cd /Users/zhongdj/Workspaces/mad-polaris/fab-simulator-demo
+export JAVA_HOME="$(/usr/libexec/java_home -v 11)"
+MONARCH_REPOSITORY="file:///Users/zhongdj/Workspaces/mad-polaris/monarch-persistence/target/demo-candidate-20261021"
+sbt -Dmonarch.repository="$MONARCH_REPOSITORY" \
+  "core / compile" "web / compile" "web / Test / compile" \
+  "web / testOnly net.imadz.application.chain.LotAckGateSpec net.imadz.application.chain.FabPipelineExecutionActorSpec"
+```
+
+These tests run the actual persistent pipeline parent and Monarch child with
+serializer-enabled persistence testkits, controlled equipment/lot boundaries,
+and a local actor provider. They do not launch Play, MongoDB, containers, a
+cluster, or listeners on `9000`/`2551`. Actor replay is not a true JVM restart or
+complete business/Saga/projection E2E. See [VALIDATION-0.2.1.md](VALIDATION-0.2.1.md)
+for exact artifact hashes, test evidence and remaining gaps. In particular,
+child checkpoints and parent progress/terminal events are not reconciled across
+crashes, and inline OCAP acknowledgement handling is incomplete. The recorded
+9/9 result is scoped test evidence, not acceptance of those recovery windows.
+A fresh isolated packaged-web launch also stopped before HTTP with a missing
+`ClusterSharding` Guice binding; actual web workflow verification remains blocked.
+
+For a separately configured application run, pass the same repository property
+to `sbt ... "web / run"`; the default HTTP/remoting ports overlap with Bank, so
+do not run both demos unchanged at the same time.
 
 ## Build
 

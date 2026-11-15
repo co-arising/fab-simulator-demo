@@ -54,9 +54,14 @@ object FabScenarioPipeline {
             ctx.publish(PipelineStageFailed(err.stageName, err.equipId, err.errorCode, err.detail))
             ctx.stageProgress("FAILED", s"${err.stageName}: ${err.detail}", "PhaseFailed")
             invokeOcapInterceptor(state, ctx, err)
+          case ex if ex eq net.imadz.monarch.StaleRun => Future.failed(ex)
+          case ex: PipelineStages.RecoveryRequired => Future.failed(ex)
+          case ex: net.imadz.fab.protocol.ActorEquipmentAdapter.OutcomeUnknown => Future.failed(ex)
+          case ex: net.imadz.fab.protocol.ActorEquipmentAdapter.JobBusy => Future.failed(ex)
+          case ex: net.imadz.fab.protocol.ActorEquipmentAdapter.SimulatorUnavailable => Future.failed(ex)
           case ex: Exception =>
             ctx.stageProgress("ERROR", s"Unexpected: ${ex.getMessage}", "PhaseFailed")
-            Future.successful(state)
+            Future.failed(ex)
         }(ctx.ec)
       )(ctx.ec)
     }
@@ -83,7 +88,19 @@ object FabScenarioPipeline {
   case object PostReleaseClassify extends PipelineStage
   case class WaitForReview(durationMs: Long) extends PipelineStage
   case object SealComplete extends PipelineStage
+  /** Legacy runtime-only branch. Arbitrary predicates are not durable plan data. */
   case class Branch(cond: FabDemoState => Boolean, ifTrue: Seq[PipelineStage], ifFalse: Seq[PipelineStage]) extends PipelineStage
+
+  sealed trait NamedCondition {
+    def evaluate(state: FabDemoState): Boolean
+  }
+  case object PilotPassed extends NamedCondition {
+    override def evaluate(state: FabDemoState): Boolean = state.pilotPassed
+  }
+  case object ReviewApproved extends NamedCondition {
+    override def evaluate(state: FabDemoState): Boolean = state.reviewApproved
+  }
+  case class ConditionalBranch(condition: NamedCondition, ifTrue: Seq[PipelineStage], ifFalse: Seq[PipelineStage]) extends PipelineStage
   case object PilotSubFlow extends PipelineStage
   // Unified IR extensions (M3.5+)
   case class OcapEvaluate(rules: List[OcapRuleDefinition]) extends PipelineStage
@@ -133,6 +150,8 @@ object FabScenarioPipeline {
       case WaitForReview(ms)    => waitForReview(state, ctx, ms)
       case SealComplete         => PipelineStages.sealComplete(state, ctx)
       case Branch(cond, t, f)   => if (cond(state)) runSequence(t, state, ctx) else runSequence(f, state, ctx)
+      case ConditionalBranch(condition, t, f) =>
+        if (condition.evaluate(state)) runSequence(t, state, ctx) else runSequence(f, state, ctx)
       case PilotSubFlow           => runPilotSubFlow(state, ctx)
       case OcapEvaluate(rules)    => ocapEvaluate(state, ctx, rules)
       case ExecuteSubProcess(ref) => executeSubProcess(state, ctx, ref, nodeId = Some(ref.nodeId))
@@ -164,7 +183,7 @@ object FabScenarioPipeline {
     val equipId = "LITHO-01"; val cdSemId = "CDSEM-01"
     Seq(
       LoadFoup, SagaSplit("pilot"), PilotSubFlow,
-      Branch(_.pilotPassed,
+      ConditionalBranch(PilotPassed,
         Seq(SagaMerge("pilot"),
           Transport("STOCKER", "LITHO"), AtEquipment("LITHO", equipId),
           TrackIn(equipId), RunRecipe(equipId, "LITHO-28-001"), TrackOut(equipId),
@@ -203,7 +222,7 @@ object FabScenarioPipeline {
       Transport("LITHO", "CDSEM"), AtEquipment("METROLOGY", cdSemId),
       TrackIn(cdSemId), Measure(cdSemId), TrackOut(cdSemId), Classify,
       SagaSplit("hold"), HoldWafers, WaitForReview(15000), ReleaseWafers,
-      Branch(_.reviewApproved,
+      ConditionalBranch(ReviewApproved,
         Seq(SagaMerge("hold"), PostReleaseClassify, Transport("CDSEM", "STOCKER"), SealComplete),
         Seq(ScrapWafers, Transport("CDSEM", "STOCKER"), SealComplete)))
   }
@@ -235,7 +254,7 @@ object FabScenarioPipeline {
       LoadFoup, SagaSplit("pilot"), PilotSubFlow,
       M35ClassifyWithOcap(rules),
       OcapActionRouter,
-      Branch(_.pilotPassed,
+      ConditionalBranch(PilotPassed,
         Seq(SagaMerge("pilot"),
           Transport("STOCKER", "LITHO"), AtEquipment("LITHO", equipId),
           TrackIn(equipId), RunRecipe(equipId, "LITHO-28-001"), TrackOut(equipId),
@@ -621,7 +640,7 @@ object FabScenarioPipeline {
     val rules = ctx.ocapRules
     if (rules.isEmpty) {
       ctx.notifyLot(FailLot(err.detail, err.stageName, _))
-      Future.successful(state) // no rules — Phase 1 behavior
+      Future.failed(StageFailedException(err)) // no recovery rule: preserve failure
     } else {
       OcapEngine.matchRules(state, rules).headOption match {
         case Some(rule) =>
@@ -635,7 +654,7 @@ object FabScenarioPipeline {
           executeOcapAction(s, ctx, rule.actionPlan)
         case None =>
           ctx.notifyLot(FailLot(err.detail, err.stageName, _))
-          Future.successful(state) // no rules triggered
+          Future.failed(StageFailedException(err)) // unmatched rules do not resolve the failure
       }
     }
   }

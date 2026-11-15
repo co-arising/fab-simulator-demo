@@ -6,45 +6,24 @@ import akka.cluster.sharding.typed.scaladsl.EntityRef
 import akka.util.Timeout
 import net.imadz.application.aggregates.LotProtocol.{LotCommand, LotConfirmation}
 
-import java.util.concurrent.atomic.{AtomicBoolean, AtomicInteger, AtomicReference}
 import scala.concurrent.{ExecutionContext, Future, Promise}
-import scala.util.{Failure, Success}
+import scala.util.{Failure, Success, Try}
+import scala.util.control.NonFatal
 
-/**
- * Per-stage acknowledgment gate for lot notifications.
- *
- * Business meaning: when the pipeline tells a lot "record this measurement /
- * classification / split", the lot must confirm it received and journaled the
- * fact before the step counts as done. A lot that crashed or is too slow no
- * longer leaves the two sides silently diverged — the step fails loudly instead,
- * and the failure flows through the normal step-failure path (OCAP evaluation).
- *
- * One gate per step: the step interpreter installs a fresh tracking gate in the
- * context before each step and drains it afterwards. The direct-invocation path
- * (FabDemoService direct step runs, unit tests) keeps the old fire-and-forget
- * behavior via [[LotAckGate.fireAndForget]].
- */
+/** Tracks the confirmations for one stage. A received reply is not necessarily
+  * an acceptance: the lot may explicitly reject the command. */
 trait LotAckGate {
-
-  /** Send a lot command. Returns immediately; the confirmation is tracked. */
   def tell(lotRef: ActorRef[LotCommand], cmd: ActorRef[LotConfirmation] => LotCommand): Unit
-
-  /** Send a lot command to a sharded lot. Returns immediately; tracked. */
   def tell(lotRef: EntityRef[LotCommand], cmd: ActorRef[LotConfirmation] => LotCommand): Unit
 
-  /** No more notifications will be sent for this step. The returned Future
-    * completes once every tracked notification is confirmed, or fails with the
-    * first timeout / lot-side error. */
+  /** Closes registration and waits for all registered requests to settle. */
   def seal(): Future[Unit]
 }
 
 object LotAckGate {
+  final case class LotRejected(detail: String) extends RuntimeException(detail)
 
-  /**
-   * Fire-and-forget gate — the pre-2026-10-18 behavior. Notifications are sent
-   * without tracking; `seal()` always succeeds. Kept for the direct-invocation
-   * path where there is no step interpreter to drain the gate.
-   */
+  /** Direct demonstration calls have no persistent stage boundary. */
   def fireAndForget(replyTo: ActorRef[LotConfirmation]): LotAckGate = new LotAckGate {
     override def tell(lotRef: ActorRef[LotCommand], cmd: ActorRef[LotConfirmation] => LotCommand): Unit =
       lotRef ! cmd(replyTo)
@@ -53,53 +32,54 @@ object LotAckGate {
     override def seal(): Future[Unit] = Future.successful(())
   }
 
-  /**
-   * Tracking gate — each `tell` sends via ask-with-timeout. `seal()` fails with
-   * the first unconfirmed notification (timeout or lot-side error), which the
-   * step interpreter turns into a step failure (`LOT_ACK_TIMEOUT`).
-   */
   def tracking(timeout: Timeout)(implicit ec: ExecutionContext, scheduler: Scheduler): LotAckGate =
     new LotAckGate {
-      private val pending = new AtomicInteger(0)
-      private val firstFailure = new AtomicReference[Throwable]()
-      private val sealedFlag = new AtomicBoolean(false)
+      private var pending = 0
+      private var sealedFlag = false
+      private var firstFailure: Option[Throwable] = None
       private val done = Promise[Unit]()
 
-      private def checkDone(): Unit =
-        if (sealedFlag.get() && pending.get() == 0) {
-          val f = firstFailure.get()
-          if (f == null) done.trySuccess(()) else done.tryFailure(f)
-        }
+      // Registration and sealing share this monitor. No request can be sent
+      // after seal has observed an empty set of pending confirmations.
+      private def track(request: => Future[LotConfirmation]): Unit = synchronized {
+        require(!sealedFlag, "lot acknowledgement gate is already sealed")
+        pending += 1
+        try request.onComplete(settle)
+        catch { case NonFatal(ex) => settle(Failure(ex)) }
+      }
 
-      override def tell(lotRef: ActorRef[LotCommand], cmd: ActorRef[LotConfirmation] => LotCommand): Unit = {
-        pending.incrementAndGet()
-        lotRef.ask[LotConfirmation](replyTo => cmd(replyTo))(timeout, scheduler).onComplete {
-          case Success(_) =>
-            pending.decrementAndGet()
-            checkDone()
-          case Failure(ex) =>
-            firstFailure.compareAndSet(null, ex)
-            pending.decrementAndGet()
-            checkDone()
+      private def settle(result: Try[LotConfirmation]): Unit = synchronized {
+        val failure = result match {
+          case Success(confirmation) => confirmation.error.map(error => LotRejected(s"${error.code}: ${error.message}"))
+          case Failure(ex) => Some(ex)
+        }
+        failure.foreach { ex =>
+          // A timeout/transport error leaves the outcome unknown. It must not
+          // be hidden by an earlier explicit rejection from another request.
+          if (firstFailure.isEmpty || (firstFailure.get.isInstanceOf[LotRejected] && !ex.isInstanceOf[LotRejected]))
+            firstFailure = Some(ex)
+        }
+        pending -= 1
+        checkDone()
+      }
+
+      private def checkDone(): Unit = {
+        if (sealedFlag && pending == 0) firstFailure match {
+          case Some(ex) => done.tryFailure(ex)
+          case None => done.trySuccess(())
         }
       }
+
+      override def tell(lotRef: ActorRef[LotCommand], cmd: ActorRef[LotConfirmation] => LotCommand): Unit =
+        track(lotRef.ask[LotConfirmation](replyTo => cmd(replyTo))(timeout, scheduler))
 
       override def tell(lotRef: EntityRef[LotCommand], cmd: ActorRef[LotConfirmation] => LotCommand): Unit = {
-        pending.incrementAndGet()
         implicit val t: Timeout = timeout
-        lotRef.ask[LotConfirmation](replyTo => cmd(replyTo)).onComplete {
-          case Success(_) =>
-            pending.decrementAndGet()
-            checkDone()
-          case Failure(ex) =>
-            firstFailure.compareAndSet(null, ex)
-            pending.decrementAndGet()
-            checkDone()
-        }
+        track(lotRef.ask[LotConfirmation](replyTo => cmd(replyTo)))
       }
 
-      override def seal(): Future[Unit] = {
-        sealedFlag.set(true)
+      override def seal(): Future[Unit] = synchronized {
+        sealedFlag = true
         checkDone()
         done.future
       }

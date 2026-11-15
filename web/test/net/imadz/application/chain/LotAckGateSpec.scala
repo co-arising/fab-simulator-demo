@@ -3,14 +3,16 @@ package net.imadz.application.chain
 import akka.actor.typed.{ActorSystem, Behavior}
 import akka.actor.typed.scaladsl.Behaviors
 import akka.util.Timeout
+import com.typesafe.config.ConfigFactory
 import net.imadz.application.aggregates.LotProtocol.{LotCommand, LotConfirmation, RecordWaferMeasured}
-import net.imadz.application.chain.FabExecutionModel.{StageError => FabStageError, StageFailedException => FabStageFailedException}
+import akka.cluster.sharding.typed.scaladsl.EntityTypeKey
+import akka.cluster.sharding.typed.testkit.scaladsl.TestEntityRef
+import net.imadz.common.CommonTypes.iMadzError
 import org.scalatest.concurrent.ScalaFutures
 import org.scalatest.matchers.should.Matchers
 import org.scalatest.wordspec.AnyWordSpec
 
 import java.util.UUID
-import scala.concurrent.Future
 import scala.concurrent.duration._
 
 /**
@@ -39,7 +41,13 @@ class LotAckGateSpec extends AnyWordSpec with Matchers with ScalaFutures {
     }
 
   private def withSystem[T](name: String)(body: ActorSystem[Nothing] => T): T = {
-    implicit val system: ActorSystem[Nothing] = ActorSystem(Behaviors.empty, name)
+    // Do not inherit the demo's cluster provider, seed nodes, or fixed port.
+    val config = ConfigFactory.parseString("""
+      akka.actor.provider = local
+      akka.remote.artery.canonical.port = 0
+      akka.cluster.seed-nodes = []
+    """).withFallback(ConfigFactory.load())
+    implicit val system: ActorSystem[Nothing] = ActorSystem[Nothing](Behaviors.empty, name, config)
     try body(system)
     finally {
       system.terminate()
@@ -75,39 +83,72 @@ class LotAckGateSpec extends AnyWordSpec with Matchers with ScalaFutures {
       failure shouldBe a[Exception]
     }
 
-    "surface an unconfirmed lot notification to the pipeline as a LOT_ACK_TIMEOUT step failure" in
-      withSystem("gate-pipeline") { implicit system =>
-        implicit val ec = system.executionContext
-        implicit val scheduler = system.scheduler
-        implicit val timeout: Timeout = 300.millis
+    "reject an explicit lot error for actor and sharded references" in withSystem("gate-rejected") { implicit system =>
+      implicit val ec = system.executionContext
+      implicit val scheduler = system.scheduler
+      val lot = system.systemActorOf(Behaviors.receiveMessage[LotCommand] {
+        case RecordWaferMeasured(_, _, replyTo) =>
+          replyTo ! LotConfirmation(Some(iMadzError("LOT_HELD", "review required")))
+          Behaviors.same
+        case _ => Behaviors.same
+      }, "rejecting-lot")
+      val actorGate = LotAckGate.tracking(Timeout(3.seconds))
+      actorGate.tell(lot, RecordWaferMeasured(UUID.randomUUID(), 1.0, _))
+      actorGate.seal().failed.futureValue shouldBe LotAckGate.LotRejected("LOT_HELD: review required")
 
-        // Mirrors ChildRunHost.interpreter's drain composition: the step's
-        // Future only succeeds after the ack gate drains; a drain failure
-        // becomes the step failure the pipeline observes.
-        val gate = LotAckGate.tracking(timeout)
-        gate.tell(system.ignoreRef, RecordWaferMeasured(UUID.randomUUID(), 1.0, _))
+      val shardedGate = LotAckGate.tracking(Timeout(3.seconds))
+      val ref = TestEntityRef(EntityTypeKey[LotCommand]("test-lot"), "held", lot)
+      shardedGate.tell(ref, RecordWaferMeasured(UUID.randomUUID(), 1.0, _))
+      shardedGate.seal().failed.futureValue shouldBe LotAckGate.LotRejected("LOT_HELD: review required")
+    }
 
-        val stepResult: Future[String] =
-          Future.successful("step-done").flatMap { next =>
-            gate.seal().map(_ => next).recoverWith {
-              case ex =>
-                Future.failed(FabStageFailedException(
-                  FabStageError("cursor", None, "LOT_ACK_TIMEOUT", ex.getMessage)))
-            }
-          }
-
-        val err = stepResult.failed.futureValue
-        err shouldBe a[FabStageFailedException]
-        err.asInstanceOf[FabStageFailedException].error.errorCode shouldBe "LOT_ACK_TIMEOUT"
+    "refuse registration after sealing without sending a command" in withSystem("gate-sealed") { implicit system =>
+      implicit val ec = system.executionContext
+      implicit val scheduler = system.scheduler
+      val gate = LotAckGate.tracking(Timeout(3.seconds))
+      gate.seal().futureValue shouldBe (())
+      intercept[IllegalArgumentException] {
+        gate.tell(system.ignoreRef, _ => throw new AssertionError("must not create a command after seal"))
       }
+    }
+
+    "settle a synchronous command construction failure" in withSystem("gate-sync-error") { implicit system =>
+      implicit val ec = system.executionContext
+      implicit val scheduler = system.scheduler
+      val gate = LotAckGate.tracking(Timeout(3.seconds))
+      val failure = new IllegalStateException("cannot construct command")
+      val lot = system.systemActorOf(confirmingLot, "lot")
+      gate.tell(lot, _ => throw failure)
+      gate.seal().failed.futureValue shouldBe failure
+    }
+
+    "wait for every registered confirmation even after one rejects" in withSystem("gate-drain") { implicit system =>
+      implicit val ec = system.executionContext
+      implicit val scheduler = system.scheduler
+      val pendingReply = scala.concurrent.Promise[akka.actor.typed.ActorRef[LotConfirmation]]()
+      val lot = system.systemActorOf(Behaviors.receiveMessage[LotCommand] {
+        case RecordWaferMeasured(_, value, replyTo) if value == 1.0 =>
+          replyTo ! LotConfirmation(Some(iMadzError("LOT_HELD", "review required")))
+          Behaviors.same
+        case RecordWaferMeasured(_, _, replyTo) =>
+          pendingReply.success(replyTo)
+          Behaviors.same
+        case _ => Behaviors.same
+      }, "lot")
+      val gate = LotAckGate.tracking(Timeout(3.seconds))
+      gate.tell(lot, RecordWaferMeasured(UUID.randomUUID(), 1.0, _))
+      gate.tell(lot, RecordWaferMeasured(UUID.randomUUID(), 2.0, _))
+      val result = gate.seal()
+      val reply = pendingReply.future.futureValue
+      result.isCompleted shouldBe false
+      reply ! LotConfirmation(None)
+      result.failed.futureValue shouldBe LotAckGate.LotRejected("LOT_HELD: review required")
+    }
   }
 
   "LotAckGate.fireAndForget" should {
 
     "preserve the old behavior: seal always succeeds without tracking" in withSystem("gate-ff") { implicit system =>
-      implicit val ec = system.executionContext
-      implicit val scheduler = system.scheduler
-
       val gate = LotAckGate.fireAndForget(system.ignoreRef)
       gate.tell(system.ignoreRef, RecordWaferMeasured(UUID.randomUUID(), 42.0, _))
 

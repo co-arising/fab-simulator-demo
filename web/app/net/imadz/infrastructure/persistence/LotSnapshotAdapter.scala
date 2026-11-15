@@ -7,7 +7,8 @@ import net.imadz.infrastructure.proto.lot.LotStatePO
 
 class LotSnapshotAdapter extends SnapshotAdapter[LotState] with LotProtoConverters {
 
-  override def toJournal(state: LotState): Any = LotStateConv.toProto(state)
+  // Keep the GeneratedMessage journal type and its existing protobuf binding.
+  override def toJournal(state: LotState): LotStatePO = LotStateConv.toProto(state)
 
   override def fromJournal(from: Any): LotState = from match {
     case po: LotStatePO => LotStateConv.fromProto(po)
